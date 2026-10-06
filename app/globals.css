@@ -138,16 +138,9 @@ body {
 /* Mode selector */
 .mode-selector {
   display: flex;
+  flex-wrap: wrap; /* all modes stay visible; a hidden sideways scroll hid four of them */
   gap: 6px;
   margin-bottom: 12px;
-  overflow-x: auto;
-  -webkit-overflow-scrolling: touch;
-  scrollbar-width: none;
-  padding-bottom: 2px;
-}
-
-.mode-selector::-webkit-scrollbar {
-  display: none;
 }
 
 .mode-btn {
