@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { isGoogleEnabled } from "../lib/config.ts";
+import { hasBlobToken, isGoogleEnabled } from "../lib/config.ts";
 
 test("Google is on when both vars are set", () => {
   assert.equal(isGoogleEnabled({ GOOGLE_CLIENT_ID: "id", GOOGLE_CLIENT_SECRET: "secret" }), true);
@@ -35,4 +35,14 @@ test("the server key counts only when it is non-blank", async () => {
   assert.equal(hasServerOpenAIKey({ OPENAI_API_KEY: "" }), false);
   assert.equal(hasServerOpenAIKey({ OPENAI_API_KEY: "  " }), false);
   assert.equal(hasServerOpenAIKey({}), false);
+});
+
+test("a Blob read-write token means the older client-token upload", () => {
+  assert.equal(hasBlobToken({ BLOB_READ_WRITE_TOKEN: "vercel_blob_rw_x" }), true);
+});
+
+test("a store with only a store ID uses presigned uploads", () => {
+  assert.equal(hasBlobToken({ BLOB_STORE_ID: "store_x", BLOB_WEBHOOK_PUBLIC_KEY: "key" }), false);
+  assert.equal(hasBlobToken({ BLOB_READ_WRITE_TOKEN: "  " }), false);
+  assert.equal(hasBlobToken({}), false);
 });

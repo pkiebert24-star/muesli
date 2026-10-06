@@ -30,7 +30,7 @@ That is all.
 1. Copy this repository to your own GitHub account (fork it, or clone it and push it).
 2. In Vercel, go to [vercel.com/new](https://vercel.com/new) and import your copy.
 3. In your Vercel project, open the **Storage** tab, choose **Create**, then **Blob**, choose **Private** access, and connect it to the project.
-   This sets `BLOB_READ_WRITE_TOKEN` for you.
+   Vercel sets the storage variables for you: `BLOB_READ_WRITE_TOKEN` on older stores, or `BLOB_STORE_ID` and `BLOB_WEBHOOK_PUBLIC_KEY` on newer ones. Muesli works with both.
 4. In **Settings**, then **Environment Variables**, add these:
    - `OPENAI_API_KEY`: your OpenAI key. This one is optional. If you leave it out, the app asks each person for their own key and keeps it in their browser.
    - `AUTH_SECRET`: a long random string. Run `npx auth secret` to make one.
@@ -53,7 +53,7 @@ cp .env.example .env.local
 ```
 
 Fill in `.env.local` with the same values as above.
-For `BLOB_READ_WRITE_TOKEN`, copy the value from your Vercel project's environment variables.
+For the Blob variables, run `vercel env pull .env.local` in your project folder, or copy the values from your Vercel project's environment variables. Newer stores need the Vercel CLI, because their uploads sign in through your Vercel project.
 Then start the app:
 
 ```bash

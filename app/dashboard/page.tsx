@@ -2,7 +2,7 @@
 
 import { useState, useRef, useCallback, useEffect } from "react";
 import { signOut } from "next-auth/react";
-import { upload } from '@vercel/blob/client';
+import { upload, uploadPresigned } from '@vercel/blob/client';
 import { AUDIO_EXTENSIONS, audioExtension, audioFileInfo, tooLargeMessage } from "@/lib/audio";
 import type { NoteMode } from "@/lib/prompts";
 import { CopyNoteButton } from "./copy-note-button";
@@ -102,6 +102,7 @@ export default function Dashboard() {
   const [keyError, setKeyError] = useState("");
   const [source, setSource] = useState<AudioSource>("mic");
   const [uploading, setUploading] = useState(false);
+  const [blobMode, setBlobMode] = useState<"token" | "presigned">("presigned");
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
@@ -150,12 +151,31 @@ export default function Dashboard() {
     fetch("/api/settings")
       .then((res) => res.json())
       .then((data) => {
+        if (data.blobMode === "token" || data.blobMode === "presigned") setBlobMode(data.blobMode);
         if (!data.needsOpenAIKey) return;
         setNeedsKey(true);
         setOpenaiKey(window.localStorage.getItem(OPENAI_KEY_STORAGE) || "");
       })
       .catch(() => { /* leave the prompt off; the server still asks for a key */ });
   }, []);
+
+  // The upload folder is named after the signed-in person. If the page has not
+  // loaded the email yet, ask for it now instead of saving into a wrong folder.
+  const resolveEmail = async (): Promise<string> => {
+    if (userEmail) return userEmail;
+    try {
+      const res = await fetch("/api/recordings");
+      const data = await res.json();
+      if (typeof data.email === "string" && data.email) {
+        setUserEmail(data.email);
+        return data.email;
+      }
+    } catch { /* fall through */ }
+    return "";
+  };
+
+  // Which kind of Blob store is connected decides how the browser uploads.
+  const uploadBlob = blobMode === "token" ? upload : uploadPresigned;
 
   const saveKey = (e: React.FormEvent) => {
     e.preventDefault();
@@ -201,13 +221,21 @@ export default function Dashboard() {
     const safeName = (title || "recording").toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 50);
     const filename = `${timestamp}_${safeName}.webm`;
 
-    const folder = userEmail ? `recordings/${userEmail}` : `recordings/anonymous`;
+    const email = await resolveEmail();
+    if (!email) {
+      setStatus({ text: "Could not confirm your login. Reload the page and sign in again.", type: "error" });
+      setIsRecording(false);
+      setTimer("00:00");
+      startTimeRef.current = null;
+      return;
+    }
+    const folder = `recordings/${email}`;
 
     try {
-      await upload(`${folder}/${filename}`, blob, {
+      await uploadBlob(`${folder}/${filename}`, blob, {
         access: 'private',
         handleUploadUrl: '/api/upload',
-        clientPayload: JSON.stringify({ email: userEmail })
+        clientPayload: JSON.stringify({ email })
       });
 
       // The recording is saved either way. A file over the transcription limit cannot be turned into notes.
@@ -326,13 +354,19 @@ export default function Dashboard() {
     const timestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
     const stem = file.name.replace(/\.[^.]+$/, "");
     const safeName = (title || stem || "recording").toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 50);
-    const folder = userEmail ? `recordings/${userEmail}` : `recordings/anonymous`;
+    const email = await resolveEmail();
+    if (!email) {
+      setStatus({ text: "Could not confirm your login. Reload the page and sign in again.", type: "error" });
+      setUploading(false);
+      return;
+    }
+    const folder = `recordings/${email}`;
 
     try {
-      await upload(`${folder}/${timestamp}_${safeName}.${extension}`, file, {
+      await uploadBlob(`${folder}/${timestamp}_${safeName}.${extension}`, file, {
         access: 'private',
         handleUploadUrl: '/api/upload',
-        clientPayload: JSON.stringify({ email: userEmail }),
+        clientPayload: JSON.stringify({ email }),
         // Browsers report odd types for some files, so send the one that matches the extension.
         contentType: audioFileInfo(`x.${extension}`).type,
       });

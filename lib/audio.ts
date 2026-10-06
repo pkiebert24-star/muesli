@@ -63,3 +63,10 @@ export function tooLargeMessage(bytes: number): string | null {
     `(32 kbps is enough for speech) or split it into parts, then try again.`
   );
 }
+
+// A recording may be uploaded only into the signed-in person's own folder.
+export function isOwnRecordingPath(pathname: string, email: string): boolean {
+  if (!email) return false;
+  if (pathname.includes("..")) return false;
+  return pathname.startsWith(`recordings/${email}/`) && audioExtension(pathname) !== null;
+}

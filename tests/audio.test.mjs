@@ -6,6 +6,7 @@ import {
   MAX_TRANSCRIBE_BYTES,
   audioExtension,
   audioFileInfo,
+  isOwnRecordingPath,
   tooLargeMessage,
 } from "../lib/audio.ts";
 
@@ -42,4 +43,15 @@ test("accepts a file at the limit and rejects one byte over", () => {
   assert.equal(tooLargeMessage(MAX_TRANSCRIBE_BYTES), null);
   assert.match(tooLargeMessage(MAX_TRANSCRIBE_BYTES + 1), /at most 25\.0 MB/);
   assert.match(tooLargeMessage(60 * 1024 * 1024), /60\.0 MB/);
+});
+
+test("recordings go only into the signed-in person's own folder", () => {
+  const email = "a@b.de";
+  assert.equal(isOwnRecordingPath("recordings/a@b.de/2026-10-06_talk.webm", email), true);
+  assert.equal(isOwnRecordingPath("recordings/a@b.de/2026-10-06_replay.mp4", email), true);
+  assert.equal(isOwnRecordingPath("recordings/anonymous/2026-10-06_talk.webm", email), false);
+  assert.equal(isOwnRecordingPath("recordings/other@b.de/talk.webm", email), false);
+  assert.equal(isOwnRecordingPath("recordings/a@b.de/../other@b.de/talk.webm", email), false);
+  assert.equal(isOwnRecordingPath("recordings/a@b.de/notes.pdf", email), false);
+  assert.equal(isOwnRecordingPath("recordings//talk.webm", ""), false);
 });

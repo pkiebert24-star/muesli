@@ -8,3 +8,9 @@ export function isGoogleEnabled(env: Record<string, string | undefined> = proces
 export function hasServerOpenAIKey(env: Record<string, string | undefined> = process.env): boolean {
   return Boolean(env.OPENAI_API_KEY?.trim());
 }
+
+// Older Blob stores give the project a read-write token. Newer ones set a store ID
+// and a webhook key instead, and uploads use presigned URLs.
+export function hasBlobToken(env: Record<string, string | undefined> = process.env): boolean {
+  return Boolean(env.BLOB_READ_WRITE_TOKEN?.trim());
+}
