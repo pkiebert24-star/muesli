@@ -1,7 +1,7 @@
-import { list } from "@vercel/blob";
-import { NextResponse } from "next/server";
+import { del, list } from "@vercel/blob";
+import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/auth";
-import { audioExtension } from "@/lib/audio";
+import { audioExtension, isOwnRecordingPath } from "@/lib/audio";
 
 export const runtime = "nodejs";
 
@@ -40,5 +40,31 @@ export async function GET() {
   } catch (error) {
     console.error("List recordings error:", error);
     return NextResponse.json({ recordings: [] }, { status: 200 });
+  }
+}
+
+// Deletes recordings (all parts of one recording at once). Only files in the
+// signed-in person's own folder can be deleted.
+export async function DELETE(request: NextRequest) {
+  try {
+    const session = await auth();
+    const email = session?.user?.email;
+    if (!email) {
+      return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 });
+    }
+    const { pathnames } = await request.json();
+    if (
+      !Array.isArray(pathnames) ||
+      pathnames.length === 0 ||
+      pathnames.length > 100 ||
+      !pathnames.every((p) => typeof p === "string" && isOwnRecordingPath(p, email))
+    ) {
+      return NextResponse.json({ ok: false, error: "Invalid recordings" }, { status: 400 });
+    }
+    await del(pathnames);
+    return NextResponse.json({ ok: true });
+  } catch (error) {
+    console.error("Delete recordings error:", error);
+    return NextResponse.json({ ok: false, error: "Could not delete" }, { status: 500 });
   }
 }

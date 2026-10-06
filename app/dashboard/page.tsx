@@ -3,7 +3,18 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 import { signOut } from "next-auth/react";
 import { upload, uploadPresigned } from '@vercel/blob/client';
-import { AUDIO_EXTENSIONS, audioExtension, audioFileInfo, tooLargeMessage } from "@/lib/audio";
+import { AUDIO_EXTENSIONS, audioExtension, audioFileInfo, MAX_TRANSCRIBE_BYTES } from "@/lib/audio";
+import {
+  SEGMENT_SECONDS,
+  WAV_CHUNK_SECONDS,
+  WAV_SAMPLE_RATE,
+  chunkRanges,
+  downmixToMono,
+  encodeWav,
+  groupRecordings,
+  partPath,
+  type RecordingGroup,
+} from "@/lib/split";
 import type { NoteMode } from "@/lib/prompts";
 import { CopyNoteButton } from "./copy-note-button";
 
@@ -105,7 +116,9 @@ export default function Dashboard() {
   const [blobMode, setBlobMode] = useState<"token" | "presigned">("presigned");
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-  const audioChunksRef = useRef<Blob[]>([]);
+  const segmentsRef = useRef<Blob[]>([]);
+  const rotateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const rotatingRef = useRef(false);
   const cleanupRef = useRef<(() => void) | null>(null);
   const finishRef = useRef<() => Promise<void>>(async () => {});
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -208,50 +221,66 @@ export default function Dashboard() {
 
   // Stops the recorder. Saving happens in finishRecording once it has stopped.
   const stopRecording = () => {
+    // A stop must end the recording, not start the next part.
+    rotatingRef.current = false;
+    if (rotateTimerRef.current) clearTimeout(rotateTimerRef.current);
     const recorder = mediaRecorderRef.current;
     if (recorder && recorder.state !== "inactive") recorder.stop();
+  };
+
+  // Saves the parts of a recording. One part keeps the plain file name; several
+  // parts get "_part1", "_part2", ... so the list can put them together again.
+  const saveParts = async (parts: Blob[], extension: string, contentType: string, name: string): Promise<boolean> => {
+    const email = await resolveEmail();
+    if (!email) {
+      setStatus({ text: "Could not confirm your login. Reload the page and sign in again.", type: "error" });
+      return false;
+    }
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+    const safeName = (name || "recording").toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 50);
+    const base = `recordings/${email}/${timestamp}_${safeName}`;
+    try {
+      for (let i = 0; i < parts.length; i++) {
+        if (parts.length > 1) {
+          setStatus({ text: `Uploading part ${i + 1} of ${parts.length}...`, type: "processing" });
+        }
+        const path = parts.length > 1 ? partPath(base, i + 1, extension) : `${base}.${extension}`;
+        await uploadBlob(path, parts[i], {
+          access: 'private',
+          handleUploadUrl: '/api/upload',
+          clientPayload: JSON.stringify({ email }),
+          // Browsers report odd types for some files, so send the one that matches the extension.
+          contentType,
+        });
+      }
+      return true;
+    } catch (error) {
+      setStatus({ text: "Upload failed: " + (error as Error).message, type: "error" });
+      return false;
+    }
   };
 
   // Runs once the recorder has stopped, whether Stop was pressed or the tab share ended.
   const finishRecording = async () => {
     cleanupRef.current?.();
     cleanupRef.current = null;
+    if (rotateTimerRef.current) clearTimeout(rotateTimerRef.current);
     if (timerIntervalRef.current) clearInterval(timerIntervalRef.current);
+    const segments = segmentsRef.current;
+    segmentsRef.current = [];
     setStatus({ text: "Uploading securely...", type: "processing" });
-    const blob = new Blob(audioChunksRef.current, { type: "audio/webm" });
 
-    const timestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-    const safeName = (title || "recording").toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 50);
-    const filename = `${timestamp}_${safeName}.webm`;
-
-    const email = await resolveEmail();
-    if (!email) {
-      setStatus({ text: "Could not confirm your login. Reload the page and sign in again.", type: "error" });
-      setIsRecording(false);
-      setTimer("00:00");
-      startTimeRef.current = null;
-      return;
-    }
-    const folder = `recordings/${email}`;
-
-    try {
-      await uploadBlob(`${folder}/${filename}`, blob, {
-        access: 'private',
-        handleUploadUrl: '/api/upload',
-        clientPayload: JSON.stringify({ email })
+    if (segments.length === 0) {
+      setStatus({ text: "Nothing was recorded.", type: "error" });
+    } else if (await saveParts(segments, "webm", "audio/webm", title)) {
+      setStatus({
+        text: segments.length > 1
+          ? `Recording saved in ${segments.length} parts.`
+          : "Recording saved securely!",
+        type: "success",
       });
-
-      // The recording is saved either way. A file over the transcription limit cannot be turned into notes.
-      const sizeProblem = tooLargeMessage(blob.size);
-      setStatus(
-        sizeProblem
-          ? { text: `Recording saved. ${sizeProblem}`, type: "error" }
-          : { text: "Recording saved securely!", type: "success" }
-      );
       setTitle("");
       loadData();
-    } catch (error) {
-      setStatus({ text: "Upload failed: " + (error as Error).message, type: "error" });
     }
     setIsRecording(false);
     setTimer("00:00");
@@ -262,6 +291,33 @@ export default function Dashboard() {
   useEffect(() => {
     finishRef.current = finishRecording;
   });
+
+  // Records one part. After SEGMENT_SECONDS it stops and starts the next part on the
+  // same stream, so every file stays far below the transcription limit.
+  // 32 kbps mono is plenty for speech.
+  const startSegment = (stream: MediaStream) => {
+    const chunks: Blob[] = [];
+    const recorder = new MediaRecorder(stream, {
+      mimeType: "audio/webm;codecs=opus",
+      audioBitsPerSecond: 32000,
+    });
+    recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
+    recorder.onstop = () => {
+      if (chunks.length > 0) segmentsRef.current.push(new Blob(chunks, { type: "audio/webm" }));
+      if (rotatingRef.current) {
+        rotatingRef.current = false;
+        startSegment(stream);
+      } else {
+        void finishRef.current();
+      }
+    };
+    mediaRecorderRef.current = recorder;
+    recorder.start(1000);
+    rotateTimerRef.current = setTimeout(() => {
+      rotatingRef.current = true;
+      if (recorder.state !== "inactive") recorder.stop();
+    }, SEGMENT_SECONDS * 1000);
+  };
 
   // Starts recording from the microphone, a browser tab (a webinar), or both mixed.
   const startRecording = async () => {
@@ -312,17 +368,10 @@ export default function Dashboard() {
         tabAudio[0].addEventListener("ended", () => stopRecording());
       }
 
-      audioChunksRef.current = [];
-      // 32 kbps mono is plenty for speech and keeps about 100 minutes under the transcription limit.
-      const recorder = new MediaRecorder(recordStream, {
-        mimeType: "audio/webm;codecs=opus",
-        audioBitsPerSecond: 32000,
-      });
-      recorder.ondataavailable = (e) => { if (e.data.size > 0) audioChunksRef.current.push(e.data); };
-      recorder.onstop = () => { void finishRef.current(); };
+      segmentsRef.current = [];
+      rotatingRef.current = false;
       cleanupRef.current = release;
-      mediaRecorderRef.current = recorder;
-      recorder.start(1000);
+      startSegment(recordStream);
       setIsRecording(true);
       setStatus({ text: "", type: "recording" });
       startTimeRef.current = Date.now();
@@ -339,66 +388,119 @@ export default function Dashboard() {
     }
   };
 
+  // Cuts a long file into WAV parts inside the browser: decode, mix to mono at
+  // 16 kHz, then one part per WAV_CHUNK_SECONDS. Nothing leaves the computer yet.
+  const cutIntoWavParts = async (file: File): Promise<Blob[]> => {
+    const context = new AudioContext({ sampleRate: WAV_SAMPLE_RATE });
+    try {
+      const decoded = await context.decodeAudioData(await file.arrayBuffer());
+      const channels = Array.from({ length: decoded.numberOfChannels }, (_, c) => decoded.getChannelData(c));
+      const mono = downmixToMono(channels);
+      // Counted in samples, so a part is about 19 MB even if the browser ignored the 16 kHz request.
+      const ranges = chunkRanges(mono.length, WAV_CHUNK_SECONDS * WAV_SAMPLE_RATE);
+      return ranges.map((r) => new Blob([encodeWav(mono.subarray(r.start, r.end), decoded.sampleRate)], { type: "audio/wav" }));
+    } finally {
+      context.close().catch(() => { /* already closed */ });
+    }
+  };
+
   // Uploads a recording that already exists, such as a webinar replay saved as mp3 or mp4.
+  // A file over the transcription limit is cut into parts first.
   const uploadFile = async (file: File) => {
     const extension = audioExtension(file.name);
     if (!extension) {
       setStatus({ text: `That file type is not supported. Use ${AUDIO_EXTENSIONS.join(", ")}.`, type: "error" });
       return;
     }
-    const sizeProblem = tooLargeMessage(file.size);
-    if (sizeProblem) {
-      setStatus({ text: sizeProblem, type: "error" });
-      return;
-    }
     setUploading(true);
-    setStatus({ text: `Uploading "${file.name}"...`, type: "processing" });
-
-    const timestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
     const stem = file.name.replace(/\.[^.]+$/, "");
-    const safeName = (title || stem || "recording").toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 50);
-    const email = await resolveEmail();
-    if (!email) {
-      setStatus({ text: "Could not confirm your login. Reload the page and sign in again.", type: "error" });
-      setUploading(false);
-      return;
-    }
-    const folder = `recordings/${email}`;
+    const name = title || stem;
 
-    try {
-      await uploadBlob(`${folder}/${timestamp}_${safeName}.${extension}`, file, {
-        access: 'private',
-        handleUploadUrl: '/api/upload',
-        clientPayload: JSON.stringify({ email }),
-        // Browsers report odd types for some files, so send the one that matches the extension.
-        contentType: audioFileInfo(`x.${extension}`).type,
+    let parts: Blob[] = [file];
+    let partExtension = extension;
+    let contentType = audioFileInfo(`x.${extension}`).type;
+    if (file.size > MAX_TRANSCRIBE_BYTES) {
+      setStatus({ text: "File is large. Cutting it into parts in your browser (this can take a minute)...", type: "processing" });
+      try {
+        parts = await cutIntoWavParts(file);
+        partExtension = "wav";
+        contentType = "audio/wav";
+      } catch {
+        setStatus({
+          text: "This file could not be cut into parts in the browser. It may be too long (over about 2 hours) or in a format Chrome cannot read. Record the webinar live instead, or convert the file to a 32 kbps mono mp3 first.",
+          type: "error",
+        });
+        setUploading(false);
+        return;
+      }
+      if (parts.length === 0) {
+        setStatus({ text: "No sound was found in that file.", type: "error" });
+        setUploading(false);
+        return;
+      }
+    }
+
+    setStatus({ text: `Uploading "${file.name}"...`, type: "processing" });
+    if (await saveParts(parts, partExtension, contentType, name)) {
+      setStatus({
+        text: parts.length > 1
+          ? `File uploaded in ${parts.length} parts. Press Generate Notes below.`
+          : "File uploaded. Press Generate Notes below.",
+        type: "success",
       });
-      setStatus({ text: "File uploaded. Press Generate Notes below.", type: "success" });
       setTitle("");
       loadData();
-    } catch (error) {
-      setStatus({ text: "Upload failed: " + (error as Error).message, type: "error" });
     }
     setUploading(false);
   };
 
-  const processRecording = async (pathname: string, recTitle: string) => {
+  // Each part is transcribed in its own request, then the notes are written from all
+  // transcripts together. That keeps every request short, however long the recording is.
+  const processRecording = async (group: RecordingGroup) => {
     if (needsKey && !openaiKey) {
       setStatus({ text: "Add your OpenAI key above to generate notes.", type: "error" });
       return;
     }
-    setProcessingId(pathname);
-    setStatus({ text: `Processing "${recTitle}"...`, type: "processing" });
+    const headers = { "Content-Type": "application/json", ...(needsKey ? { "x-openai-key": openaiKey } : {}) };
+    const total = group.pathnames.length;
+    setProcessingId(group.key);
     try {
+      const transcripts: string[] = [];
+      for (let i = 0; i < total; i++) {
+        setStatus({
+          text: total > 1 ? `Transcribing part ${i + 1} of ${total}...` : `Processing "${group.title}"...`,
+          type: "processing",
+        });
+        const res = await fetch("/api/process", {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ step: "transcribe", pathname: group.pathnames[i] }),
+        });
+        const part = await res.json();
+        if (!part.ok) {
+          setStatus({ text: (total > 1 ? `Part ${i + 1}: ` : "") + (part.error || "Processing failed"), type: "error" });
+          setProcessingId(null);
+          return;
+        }
+        if (part.transcript) transcripts.push(part.transcript);
+      }
+      const transcript = transcripts.join("\n\n");
+      if (transcript.trim().length < 20) {
+        setStatus({ text: "Transcript too short -- the recording may not have captured audio properly.", type: "error" });
+        setProcessingId(null);
+        return;
+      }
+
+      setStatus({ text: "Writing notes...", type: "processing" });
       const res = await fetch("/api/process", {
         method: "POST",
-        headers: { "Content-Type": "application/json", ...(needsKey ? { "x-openai-key": openaiKey } : {}) },
-        body: JSON.stringify({ pathname, title: recTitle, mode }),
+        headers,
+        body: JSON.stringify({ step: "notes", transcript, title: group.title, mode }),
       });
       const data = await res.json();
-      if (data.ok) { 
-        setStatus({ text: "Notes generated!", type: "success" }); 
-        
+      if (data.ok) {
+        setStatus({ text: "Notes generated!", type: "success" });
+
         // Push notes to calendar if an event was selected
         if (selectedEventId && data.notesText) {
           setStatus({ text: "Adding to Google Calendar...", type: "processing" });
@@ -413,12 +515,30 @@ export default function Dashboard() {
              setStatus({ text: "Generated, but couldn't add to calendar", type: "error" });
           }
         }
-        
-        loadData(); 
+
+        loadData();
       }
       else { setStatus({ text: data.error || "Processing failed", type: "error" }); }
     } catch { setStatus({ text: "Connection error", type: "error" }); }
     setProcessingId(null);
+  };
+
+  // Removes a recording and all its parts. Saved notes stay.
+  const deleteRecording = async (group: RecordingGroup) => {
+    const what = group.parts > 1 ? `"${group.title}" (${group.parts} parts)` : `"${group.title}"`;
+    if (!window.confirm(`Delete the recording ${what}? Your notes stay.`)) return;
+    try {
+      const res = await fetch("/api/recordings", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pathnames: group.pathnames }),
+      });
+      if (!res.ok) throw new Error("failed");
+      setStatus({ text: "Recording deleted.", type: "success" });
+      loadData();
+    } catch {
+      setStatus({ text: "Could not delete the recording.", type: "error" });
+    }
   };
 
   const formatDate = (dateStr: string) =>
@@ -511,6 +631,7 @@ export default function Dashboard() {
           {source !== "mic" && !isRecording && (
             <p className="key-help">
               Open the webinar in its own browser tab first. When Chrome or Edge asks, choose that tab and tick “Share tab audio”.
+              Long recordings are saved automatically in 30-minute parts.
             </p>
           )}
 
@@ -644,19 +765,30 @@ export default function Dashboard() {
             </div>
           ) : (
             <div>
-              {recordings.map((r) => (
-                <div key={r.pathname} className="list-item">
+              {groupRecordings(recordings).map((g) => (
+                <div key={g.key} className="list-item">
                   <div className="list-item-info">
-                    <div className="list-item-name">{r.title}</div>
-                    <div className="list-item-meta">{formatDate(r.uploadedAt)} · {formatSize(r.size)}</div>
+                    <div className="list-item-name">{g.title}</div>
+                    <div className="list-item-meta">
+                      {formatDate(g.uploadedAt)} · {formatSize(g.size)}{g.parts > 1 ? ` · ${g.parts} parts` : ""}
+                    </div>
                   </div>
-                  <button
-                    onClick={() => processRecording(r.pathname, r.title)}
-                    disabled={processingId === r.pathname}
-                    className="btn-sm accent"
-                  >
-                    {processingId === r.pathname ? <><span className="spinner" aria-hidden="true" /> Processing...</> : "Generate Notes"}
-                  </button>
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
+                    <button
+                      onClick={() => processRecording(g)}
+                      disabled={processingId !== null}
+                      className="btn-sm accent"
+                    >
+                      {processingId === g.key ? <><span className="spinner" aria-hidden="true" /> Processing...</> : "Generate Notes"}
+                    </button>
+                    <button
+                      onClick={() => deleteRecording(g)}
+                      disabled={processingId !== null}
+                      className="btn-sm neutral"
+                    >
+                      Delete
+                    </button>
+                  </div>
                 </div>
               ))}
             </div>

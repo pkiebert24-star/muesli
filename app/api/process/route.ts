@@ -16,9 +16,13 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 });
     }
 
-    const { pathname, title, mode = "meeting" } = await request.json();
+    // Long recordings come in parts. The browser asks for one step at a time
+    // ("transcribe" a part, then write the "notes" from all transcripts), so no
+    // single request runs into the time limit. Without a step, one file is
+    // transcribed and turned into notes in one go.
+    const { pathname, title, mode = "meeting", step, transcript: sentTranscript } = await request.json();
 
-    if (!pathname) {
+    if (step !== "notes" && !pathname) {
       return NextResponse.json(
         { ok: false, error: "No recording pathname provided" },
         { status: 400 }
@@ -39,55 +43,68 @@ export async function POST(request: NextRequest) {
     // Lazy-init client (env vars not available at build time)
     const openai = new OpenAI({ apiKey });
 
-    // Step 1: Download audio from Vercel Blob
-    console.log(`Downloading: ${pathname}`);
+    let transcript: string;
+    if (step === "notes") {
+      if (typeof sentTranscript !== "string" || sentTranscript.trim().length < 20) {
+        return NextResponse.json({ ok: false, error: "No transcript provided" }, { status: 400 });
+      }
+      transcript = sentTranscript;
+    } else {
+      // Step 1: Download audio from Vercel Blob
+      console.log(`Downloading: ${pathname}`);
 
-    // Recordings are private and each user reads only their own folder.
-    const recording = pathname.startsWith(`recordings/${session.user.email}/`)
-      ? await get(pathname, { access: "private" })
-      : null;
+      // Recordings are private and each user reads only their own folder.
+      const recording = pathname.startsWith(`recordings/${session.user.email}/`)
+        ? await get(pathname, { access: "private" })
+        : null;
 
-    if (!recording || recording.statusCode !== 200) {
-      return NextResponse.json(
-        { ok: false, error: "Recording not found" },
-        { status: 404 }
+      if (!recording || recording.statusCode !== 200) {
+        return NextResponse.json(
+          { ok: false, error: "Recording not found" },
+          { status: 404 }
+        );
+      }
+
+      const audioBuffer = await new Response(recording.stream).arrayBuffer();
+
+      // One transcription request takes a limited file size. Say so plainly
+      // instead of failing inside the OpenAI call.
+      const sizeProblem = tooLargeMessage(audioBuffer.byteLength);
+      if (sizeProblem) {
+        return NextResponse.json({ ok: false, error: sizeProblem }, { status: 413 });
+      }
+
+      // Step 2: Transcribe with the current speech model
+      console.log(`Transcribing with ${TRANSCRIPTION_MODEL}...`);
+      // The endpoint reads the format from the file name, so keep the real extension.
+      const { name: audioName, type: audioType } = audioFileInfo(pathname);
+      const audioFile = new File([audioBuffer], audioName, { type: audioType });
+
+      const transcription = await openai.audio.transcriptions.create({
+        model: TRANSCRIPTION_MODEL,
+        file: audioFile,
+        response_format: "json",
+      });
+
+      transcript = transcription.text;
+
+      // A part with no speech (a break, say) is not an error. The browser skips it.
+      if (step === "transcribe") {
+        return NextResponse.json({ ok: true, transcript: (transcript || "").trim() });
+      }
+
+      if (!transcript || transcript.trim().length < 20) {
+        return NextResponse.json({
+          ok: false,
+          error:
+            "Transcript too short -- the recording may not have captured audio properly.",
+        });
+      }
+
+      console.log(
+        `Transcript: ${transcript.length} chars`
       );
     }
-
-    const audioBuffer = await new Response(recording.stream).arrayBuffer();
-
-    // One transcription request takes a limited file size. Say so plainly
-    // instead of failing inside the OpenAI call.
-    const sizeProblem = tooLargeMessage(audioBuffer.byteLength);
-    if (sizeProblem) {
-      return NextResponse.json({ ok: false, error: sizeProblem }, { status: 413 });
-    }
-
-    // Step 2: Transcribe with the current speech model
-    console.log(`Transcribing with ${TRANSCRIPTION_MODEL}...`);
-    // The endpoint reads the format from the file name, so keep the real extension.
-    const { name: audioName, type: audioType } = audioFileInfo(pathname);
-    const audioFile = new File([audioBuffer], audioName, { type: audioType });
-
-    const transcription = await openai.audio.transcriptions.create({
-      model: TRANSCRIPTION_MODEL,
-      file: audioFile,
-      response_format: "json",
-    });
-
-    const transcript = transcription.text;
-
-    if (!transcript || transcript.trim().length < 20) {
-      return NextResponse.json({
-        ok: false,
-        error:
-          "Transcript too short -- the recording may not have captured audio properly.",
-      });
-    }
-
-    console.log(
-      `Transcript: ${transcript.length} chars`
-    );
 
     // Step 3: Generate notes with OpenAI — prompt depends on mode
     console.log(`Generating notes (mode: ${mode})...`);
