@@ -38,3 +38,12 @@ test("isNoteMode accepts only the known modes", () => {
   assert.equal(isNoteMode(42), false);
   assert.equal(isNoteMode(null), false);
 });
+
+test("idea snippets mode asks for self-contained snippets with a research question", () => {
+  const prompt = buildPrompt("idea-snippets", "T", "d");
+  assert.match(prompt, /### 1\. Short heading/);
+  assert.match(prompt, /\*\*To research:\*\*/);
+  assert.match(prompt, /Do not add outside facts/);
+  assert.equal(isNoteMode("idea-snippets"), true);
+  assert.match(buildPrompt("idea-snippets", "", "d"), /Title: Idea Snippets/);
+});

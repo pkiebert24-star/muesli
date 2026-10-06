@@ -64,6 +64,7 @@ const MODES: { value: Mode; label: string; placeholder: string }[] = [
   { value: "webinar", label: "Webinar", placeholder: "e.g. Launch webinar with Alex" },
   { value: "tool-ideas", label: "Tool Ideas", placeholder: "e.g. Tool ideas from the SaaS webinar" },
   { value: "topic-expansion", label: "Expand Topic", placeholder: "e.g. Expand: cold email for freelancers" },
+  { value: "idea-snippets", label: "Idea Snippets", placeholder: "e.g. Snippets from the pricing webinar" },
 ];
 
 // Where the sound comes from. A browser tab is how you record a webinar.
@@ -652,9 +653,14 @@ export default function Dashboard() {
                     <div className="list-item-name">{n.title}</div>
                     <div className="list-item-meta">{formatDate(n.uploadedAt)}</div>
                   </div>
-                  <a href={`/api/notes/download?pathname=${encodeURIComponent(n.pathname)}`} download className="btn-sm neutral">
-                    <DownloadIcon /> Download
-                  </a>
+                  <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
+                    <a href={`/dashboard/notes?pathname=${encodeURIComponent(n.pathname)}`} target="_blank" rel="noreferrer" className="btn-sm accent">
+                      Open
+                    </a>
+                    <a href={`/api/notes/download?pathname=${encodeURIComponent(n.pathname)}`} download className="btn-sm neutral">
+                      <DownloadIcon /> Download
+                    </a>
+                  </div>
                 </div>
               ))}
             </div>

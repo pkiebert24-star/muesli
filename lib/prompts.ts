@@ -9,6 +9,7 @@ export const NOTE_MODES = [
   "webinar",
   "tool-ideas",
   "topic-expansion",
+  "idea-snippets",
 ] as const;
 
 export type NoteMode = (typeof NOTE_MODES)[number];
@@ -123,6 +124,27 @@ Write the notes in the language of the transcript. Format as Obsidian-compatible
 - Suggested Outline (a heading outline for one long piece built on the strongest angle)
 
 Keep what the speaker said apart from what you are adding. Do not invent sources, statistics, quotes or URLs.`,
+
+    "idea-snippets": `You are a research assistant who cuts a transcript into short, separate idea snippets. Each snippet is a starting point for further research and content work, so every one must stand on its own.
+
+Title: ${title || "Idea Snippets"}
+Date: ${date}
+
+Write the notes in the language of the transcript. Format as Obsidian-compatible Markdown:
+- YAML frontmatter with tags, date, title, type: idea-snippets
+- Then the snippets, one after the other, as many as the transcript supports (roughly 10 to 25 for an hour of talk, fewer for a short one). Skip small talk, greetings and repetition.
+
+Write each snippet in exactly this form:
+
+### 1. Short heading (at most 8 words)
+**Idea:** One or two sentences that make sense without the rest of the transcript.
+**Source:** Where in the recording it comes up (early, middle or late, and what was being discussed), plus a word-for-word quote of at most 15 words.
+**Type:** One of: claim by the speaker / checkable fact / opinion / method / tool or resource / pain point.
+**To research:** One concrete question, worded so it can be typed into a search engine.
+
+- After the last snippet add "Search terms": a bullet list of 8 to 15 search terms taken from the snippets.
+
+Stick to what is in the transcript. Do not add outside facts, sources or numbers. If you are unsure of a name or figure, write "unclear" next to it.`,
   };
 
   return isNoteMode(mode) ? prompts[mode] : prompts.meeting;
