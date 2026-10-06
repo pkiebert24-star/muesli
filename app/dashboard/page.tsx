@@ -141,8 +141,11 @@ export default function Dashboard() {
 
   useEffect(() => {
     loadData();
-    const interval = setInterval(loadData, 30000);
-    return () => clearInterval(interval);
+    // Each list call counts against the Blob plan's monthly operations, so the page
+    // refreshes when you come back to the tab instead of polling on a timer.
+    const onVisible = () => { if (document.visibilityState === "visible") loadData(); };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
   }, [loadData]);
 
   // When the deployment has no OpenAI key of its own, each person uses theirs.
