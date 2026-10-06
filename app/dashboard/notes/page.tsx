@@ -2,6 +2,7 @@ import { get } from "@vercel/blob";
 import Link from "next/link";
 import { auth } from "@/auth";
 import { isOwnNotePath, noteTitle, stripFrontmatter } from "@/lib/notes";
+import { CopyNoteButton } from "../copy-note-button";
 
 // Shows one saved note as an ordinary page, so a browser extension that reads
 // the open tab (such as Content Genesis) can use its text.
@@ -37,7 +38,8 @@ export default async function NotePage({
           <>
             <h2 className="section-title">{noteTitle(pathname)}</h2>
             <div style={{ whiteSpace: "pre-wrap", lineHeight: 1.65, marginTop: 16 }}>{text}</div>
-            <p style={{ marginTop: 24 }}>
+            <p style={{ marginTop: 24, display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <CopyNoteButton pathname={pathname} />
               <a
                 href={`/api/notes/download?pathname=${encodeURIComponent(pathname)}`}
                 download

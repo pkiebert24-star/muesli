@@ -5,6 +5,7 @@ import { signOut } from "next-auth/react";
 import { upload } from '@vercel/blob/client';
 import { AUDIO_EXTENSIONS, audioExtension, audioFileInfo, tooLargeMessage } from "@/lib/audio";
 import type { NoteMode } from "@/lib/prompts";
+import { CopyNoteButton } from "./copy-note-button";
 
 type Recording = {
   url: string;
@@ -653,10 +654,11 @@ export default function Dashboard() {
                     <div className="list-item-name">{n.title}</div>
                     <div className="list-item-meta">{formatDate(n.uploadedAt)}</div>
                   </div>
-                  <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
                     <a href={`/dashboard/notes?pathname=${encodeURIComponent(n.pathname)}`} target="_blank" rel="noreferrer" className="btn-sm accent">
                       Open
                     </a>
+                    <CopyNoteButton pathname={n.pathname} />
                     <a href={`/api/notes/download?pathname=${encodeURIComponent(n.pathname)}`} download className="btn-sm neutral">
                       <DownloadIcon /> Download
                     </a>
